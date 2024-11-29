@@ -1,6 +1,77 @@
 /* exported WhiteNoise, PinkNoise, BrownNoise, BinauralTone */
 'use strict';
 
+// AudioWorklet 处理器代码
+const workletCode = `
+// 白噪声处理器
+class WhiteNoiseProcessor extends AudioWorkletProcessor {
+  process(inputs, outputs) {
+    const output = outputs[0];
+    for (let channel = 0; channel < output.length; ++channel) {
+      const outputChannel = output[channel];
+      for (let i = 0; i < outputChannel.length; ++i) {
+        outputChannel[i] = Math.random() * 2 - 1;
+      }
+    }
+    return true;
+  }
+}
+
+// 粉红噪声处理器
+class PinkNoiseProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.b0 = 0; this.b1 = 0; this.b2 = 0; this.b3 = 0; this.b4 = 0; this.b5 = 0; this.b6 = 0;
+  }
+
+  process(inputs, outputs) {
+    const output = outputs[0];
+    for (let channel = 0; channel < output.length; ++channel) {
+      const outputChannel = output[channel];
+      for (let i = 0; i < outputChannel.length; ++i) {
+        const white = Math.random() * 2 - 1;
+        
+        this.b0 = 0.99886 * this.b0 + white * 0.0555179;
+        this.b1 = 0.99332 * this.b1 + white * 0.0750759;
+        this.b2 = 0.96900 * this.b2 + white * 0.1538520;
+        this.b3 = 0.86650 * this.b3 + white * 0.3104856;
+        this.b4 = 0.55000 * this.b4 + white * 0.5329522;
+        this.b5 = -0.7616 * this.b5 - white * 0.0168980;
+        
+        outputChannel[i] = (this.b0 + this.b1 + this.b2 + this.b3 + this.b4 + this.b5 + this.b6 + white * 0.5362) * 0.11;
+        this.b6 = white * 0.115926;
+      }
+    }
+    return true;
+  }
+}
+
+// 棕噪声处理器
+class BrownNoiseProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.lastOut = 0.0;
+  }
+
+  process(inputs, outputs) {
+    const output = outputs[0];
+    for (let channel = 0; channel < output.length; ++channel) {
+      const outputChannel = output[channel];
+      for (let i = 0; i < outputChannel.length; ++i) {
+        const white = Math.random() * 2 - 1;
+        this.lastOut = (this.lastOut + (0.02 * white)) / 1.02;
+        outputChannel[i] = this.lastOut * 3.5;
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('white-noise-processor', WhiteNoiseProcessor);
+registerProcessor('pink-noise-processor', PinkNoiseProcessor);
+registerProcessor('brown-noise-processor', BrownNoiseProcessor);
+`;
+
 let audioContext;
 
 /**
@@ -15,6 +86,9 @@ class Noise {
         this._type = type;
         this._volume = 0.5;
         this._playing = false;
+        this._audioContext = null;
+        this._gainNode = null;
+        this._noiseNode = null;
     }
 
     /**
@@ -47,22 +121,32 @@ class Noise {
      */
     setVolume(volume) {
         this._volume = volume;
+        if (this._gainNode) {
+            this._gainNode.gain.setValueAtTime(volume, this._audioContext.currentTime);
+        }
     }
 
     /**
      * Creates the audio context and sets up the appropriate nodes.
      */
-    _setup() {
-        if (!audioContext) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        this._audioContext = audioContext;
-        this._gainNode = this._audioContext.createGain();
-        this._gainNode.gain.value = this._volume;
-        this._noiseGenerator = this._getGenerator();
-        if (this._noiseGenerator) {
-            this._noiseGenerator.connect(this._gainNode);
-            this._gainNode.connect(this._audioContext.destination);
+    async _setup() {
+        if (!this._audioContext) {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                // 创建 Blob URL 并加载 worklet
+                const blob = new Blob([workletCode], { type: 'application/javascript' });
+                const url = URL.createObjectURL(blob);
+                await audioContext.audioWorklet.addModule(url);
+                URL.revokeObjectURL(url);
+            }
+            this._audioContext = audioContext;
+            this._gainNode = this._audioContext.createGain();
+            this._gainNode.gain.value = this._volume;
+            this._noiseNode = await this._getGenerator();
+            if (this._noiseNode) {
+                this._noiseNode.connect(this._gainNode);
+                this._gainNode.connect(this._audioContext.destination);
+            }
         }
     }
 
@@ -80,7 +164,7 @@ class Noise {
      * @private
      * @abstract
      */
-    _getGenerator() {
+    async _getGenerator() {
         throw new Error('not implemented');
     }
 
@@ -116,14 +200,16 @@ class Noise {
      * Starts the noise generator.
      * @return {boolean} Playing status.
      */
-    start() {
+    async start() {
         if (!this._playing) {
-            this._setup();
-            this._playing = true;
-            if (this._startSound) {
-                this._startSound();
+            await this._setup();
+            // 如果 AudioContext 被暂停，则恢复
+            if (this._audioContext.state === 'suspended') {
+                this._audioContext.resume();
             }
+            this._playing = true;
         }
+        return this._playing;
     }
 
     /**
@@ -132,19 +218,11 @@ class Noise {
      */
     stop() {
         if (this._playing) {
-            if (this._stopSound) {
-                this._stopSound();
-            }
-            if (this._gainNode) {
-                this._gainNode.disconnect();
-            }
-            if (this._noiseGenerator) {
-                this._noiseGenerator.disconnect();
-            }
+            this._noiseNode?.disconnect();
+            this._noiseNode = null;
             this._playing = false;
-            this._gainNode = null;
-            this._noiseGenerator = null;
         }
+        return this._playing;
     }
 }
 
@@ -163,19 +241,10 @@ class WhiteNoise extends Noise {
     /**
      * Creates the web audio node.
      * @override
-     * @return {ScriptProcessorNode} The newly created node.
-     * @see https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode
+     * @return {AudioWorkletNode} The newly created node.
      */
-    _getGenerator() {
-        const bufferSize = this._getBufferSize();
-        const node = this._audioContext.createScriptProcessor(bufferSize, 0, 1);
-        node.onaudioprocess = (e) => {
-            const output = e.outputBuffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                output[i] = Math.random() * 2 - 1;
-            }
-        };
-        return node;
+    async _getGenerator() {
+        return new AudioWorkletNode(this._audioContext, 'white-noise-processor');
     }
 }
 
@@ -194,30 +263,10 @@ class PinkNoise extends Noise {
     /**
      * Creates the web audio node.
      * @override
-     * @return {ScriptProcessorNode} The newly created node.
-     * @see https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode
+     * @return {AudioWorkletNode} The newly created node.
      */
-    _getGenerator() {
-        const bufferSize = this._getBufferSize();
-        const node = this._audioContext.createScriptProcessor(bufferSize, 0, 1);
-        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-
-        node.onaudioprocess = (e) => {
-            const output = e.outputBuffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                const white = Math.random() * 2 - 1;
-                b0 = 0.99886 * b0 + white * 0.0555179;
-                b1 = 0.99332 * b1 + white * 0.0750759;
-                b2 = 0.96900 * b2 + white * 0.1538520;
-                b3 = 0.86650 * b3 + white * 0.3104856;
-                b4 = 0.55000 * b4 + white * 0.5329522;
-                b5 = -0.7616 * b5 - white * 0.0168980;
-                output[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
-                output[i] *= 0.11;
-                b6 = white * 0.115926;
-            }
-        };
-        return node;
+    async _getGenerator() {
+        return new AudioWorkletNode(this._audioContext, 'pink-noise-processor');
     }
 }
 
@@ -236,23 +285,10 @@ class BrownNoise extends Noise {
     /**
      * Creates the web audio node.
      * @override
-     * @return {AudioNode} The newly created node.
-     * @see https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode
+     * @return {AudioWorkletNode} The newly created node.
      */
-    _getGenerator() {
-        const bufferSize = this._getBufferSize();
-        const node = this._audioContext.createScriptProcessor(bufferSize, 0, 1);
-        let lastOut = 0;
-
-        node.onaudioprocess = (e) => {
-            const output = e.outputBuffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                const white = Math.random() * 2 - 1;
-                lastOut = (lastOut + (0.02 * white)) / 1.02;
-                output[i] = lastOut * 3.5;
-            }
-        };
-        return node;
+    async _getGenerator() {
+        return new AudioWorkletNode(this._audioContext, 'brown-noise-processor');
     }
 }
 
@@ -268,7 +304,9 @@ class BinauralTone {
         // 创建左右声道振荡器
         this.leftOscillator = null;
         this.rightOscillator = null;
-        this.gainNode = null;
+        this.gainNode = this.audioContext.createGain();
+        this.gainNode.gain.value = this.volume;
+        this.gainNode.connect(this.audioContext.destination);
 
         // 默认频率设置
         this.baseFrequency = 440; // 基础频率
@@ -276,64 +314,51 @@ class BinauralTone {
     }
 
     start() {
-        if (this.playing) return;
+        if (!this.playing) {
+            // 创建并配置左声道振荡器
+            this.leftOscillator = this.audioContext.createOscillator();
+            this.leftOscillator.type = 'sine';
+            this.leftOscillator.frequency.value = this.baseFrequency;
 
-        this.gainNode = this.audioContext.createGain();
-        this.gainNode.gain.value = this.volume;
+            // 创建并配置右声道振荡器
+            this.rightOscillator = this.audioContext.createOscillator();
+            this.rightOscillator.type = 'sine';
+            this.rightOscillator.frequency.value = this.baseFrequency + this.beatFrequency;
 
-        // 创建并配置左声道振荡器
-        this.leftOscillator = this.audioContext.createOscillator();
-        this.leftOscillator.type = 'sine';
-        this.leftOscillator.frequency.value = this.baseFrequency;
+            // 创建声道合并器
+            const merger = this.audioContext.createChannelMerger(2);
 
-        // 创建并配置右声道振荡器
-        this.rightOscillator = this.audioContext.createOscillator();
-        this.rightOscillator.type = 'sine';
-        this.rightOscillator.frequency.value = this.baseFrequency + this.beatFrequency;
+            // 连接左声道
+            this.leftOscillator.connect(merger, 0, 0);
+            // 连接右声道
+            this.rightOscillator.connect(merger, 0, 1);
 
-        // 创建声相节点
-        this.leftPanner = this.audioContext.createStereoPanner();
-        this.rightPanner = this.audioContext.createStereoPanner();
-        this.leftPanner.pan.value = -1;  // 完全左声道
-        this.rightPanner.pan.value = 1;   // 完全右声道
+            // 连接到增益节点
+            merger.connect(this.gainNode);
 
-        // 连接节点
-        this.leftOscillator.connect(this.leftPanner);
-        this.rightOscillator.connect(this.rightPanner);
-        this.leftPanner.connect(this.gainNode);
-        this.rightPanner.connect(this.gainNode);
-        this.gainNode.connect(this.audioContext.destination);
-
-        // 启动振荡器
-        this.leftOscillator.start();
-        this.rightOscillator.start();
-        this.playing = true;
+            // 开始播放
+            this.leftOscillator.start();
+            this.rightOscillator.start();
+            this.playing = true;
+        }
     }
 
     stop() {
-        if (!this.playing) return;
-
-        // 停止并断开所有节点
-        this.leftOscillator.stop();
-        this.rightOscillator.stop();
-        this.leftOscillator.disconnect();
-        this.rightOscillator.disconnect();
-        this.leftPanner.disconnect();
-        this.rightPanner.disconnect();
-        this.gainNode.disconnect();
-
-        this.leftOscillator = null;
-        this.rightOscillator = null;
-        this.leftPanner = null;
-        this.rightPanner = null;
-        this.gainNode = null;
-        this.playing = false;
+        if (this.playing) {
+            this.leftOscillator.stop();
+            this.rightOscillator.stop();
+            this.leftOscillator.disconnect();
+            this.rightOscillator.disconnect();
+            this.leftOscillator = null;
+            this.rightOscillator = null;
+            this.playing = false;
+        }
     }
 
     setVolume(value) {
         this.volume = value;
         if (this.gainNode) {
-            this.gainNode.gain.value = value;
+            this.gainNode.gain.setValueAtTime(value, this.audioContext.currentTime);
         }
     }
 
@@ -342,8 +367,8 @@ class BinauralTone {
         this.beatFrequency = beatFreq;
 
         if (this.playing) {
-            this.leftOscillator.frequency.value = this.baseFrequency;
-            this.rightOscillator.frequency.value = this.baseFrequency + this.beatFrequency;
+            this.leftOscillator.frequency.setValueAtTime(baseFreq, this.audioContext.currentTime);
+            this.rightOscillator.frequency.setValueAtTime(baseFreq + beatFreq, this.audioContext.currentTime);
         }
     }
 }
