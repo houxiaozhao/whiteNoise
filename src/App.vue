@@ -5,6 +5,23 @@
       <p class="text-lg text-center text-gray-300 mb-8">为您的冥想、放松和睡眠创造完美声境</p>
 
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
+        <div class="col-span-2 bg-white/10 rounded-xl p-6 backdrop-blur-lg">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-semibold">定时关闭</h2>
+            <div v-if="timer" class="text-sm text-gray-300">剩余: {{ formatTime(remainingTime) }}</div>
+          </div>
+          <div class="space-y-4">
+            <div class="flex gap-2">
+              <input type="number" v-model="timerMinutes" class="w-24 px-3 py-2 bg-white/10 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-white/30" min="1" placeholder="分钟" />
+              <button @click="startTimer" class="px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 transition-all duration-200" :disabled="timer">开始计时</button>
+              <button v-if="timer" @click="cancelTimer" class="px-4 py-2 bg-red-500/20 rounded-lg hover:bg-red-500/30 transition-all duration-200">取消</button>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button v-for="preset in timerPresets" :key="preset" @click="timerMinutes = preset" class="px-3 py-1.5 bg-white/10 rounded-full text-sm transition-all duration-300 hover:bg-white/20">{{ preset }}分钟</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 白噪声控制 -->
         <div class="bg-white/10 rounded-xl p-6 backdrop-blur-lg transition-all duration-300 hover:bg-white/15 hover:-translate-y-1 active:scale-98 active:bg-white/25 cursor-pointer" :class="{ 'bg-white/20 shadow-lg shadow-white/10': isPlaying.white }" @click="toggleSound('white')">
           <div class="flex justify-between items-center mb-4">
@@ -93,10 +110,10 @@ const noiseGenerators = ref({
 
 // 音量和开关状态管理
 const volumes = ref({
-  white: 0.5,
-  pink: 0.5,
-  brown: 0.5,
-  binaural: 0.5,
+  white: 0.1,
+  pink: 0.1,
+  brown: 0.1,
+  binaural: 0.3,
 });
 
 const isPlaying = ref({
@@ -109,6 +126,51 @@ const isPlaying = ref({
 // 双耳节拍频率设置
 const binauralFrequency = ref(7); // 默认 7Hz (Alpha 波段)
 const selectedWave = ref("alpha"); // 默认选择 Alpha 波段
+
+// 定时器相关状态
+const timer = ref(null);
+const remainingTime = ref(0);
+const timerMinutes = ref("");
+const timerPresets = [15, 30, 45, 60, 90, 120];
+
+// 格式化时间
+const formatTime = seconds => {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+};
+
+// 开始计时
+const startTimer = () => {
+  if (!timerMinutes.value || timerMinutes.value <= 0) return;
+
+  remainingTime.value = timerMinutes.value * 60;
+  timer.value = setInterval(() => {
+    remainingTime.value--;
+    if (remainingTime.value <= 0) {
+      stopAllSounds();
+      cancelTimer();
+    }
+  }, 1000);
+};
+
+// 取消计时
+const cancelTimer = () => {
+  if (timer.value) {
+    clearInterval(timer.value);
+    timer.value = null;
+    remainingTime.value = 0;
+  }
+};
+
+// 停止所有声音
+const stopAllSounds = () => {
+  Object.keys(isPlaying.value).forEach(type => {
+    if (isPlaying.value[type]) {
+      toggleSound(type);
+    }
+  });
+};
 
 // 脑波频段定义
 const brainwaves = {
@@ -199,14 +261,12 @@ const updateBinauralWave = wave => {
 
 // 在组件卸载时清理资源
 onUnmounted(() => {
-  Object.values(noiseGenerators.value).forEach(generator => {
-    if (generator && generator.playing) {
-      generator.stop();
+  cancelTimer();
+  Object.keys(noiseGenerators.value).forEach(type => {
+    if (noiseGenerators.value[type]) {
+      noiseGenerators.value[type].stop();
     }
   });
-  if (audioContext.value) {
-    audioContext.value.close();
-  }
 });
 </script>
 
@@ -229,5 +289,21 @@ input[type="range"]:focus {
   .grid {
     @apply grid-cols-1;
   }
+}
+
+@keyframes pulse-playing {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.2);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+.bg-white\/20.shadow-lg {
+  animation: pulse-playing 1.2s infinite;
 }
 </style>
